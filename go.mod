@@ -1,3 +1,3 @@
-module github.com/gnome/twoe
+module github.com/gnomegl/twoe
 
 go 1.24.4
