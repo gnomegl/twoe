@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -19,11 +20,11 @@ import (
 )
 
 type Config struct {
-	TweetIDsFile string
-	OutputFile   string
-	Parallel     int
-	Quiet        bool
-	Append       bool
+	TweetIDs   []string
+	OutputFile string
+	Parallel   int
+	Quiet      bool
+	Append     bool
 }
 
 type TweetData struct {
@@ -40,8 +41,17 @@ type TweetResult struct {
 	URL       string
 }
 
+type CDXResult struct {
+	URL       string `json:"url"`
+	Timestamp string `json:"timestamp"`
+	Status    string `json:"status"`
+}
+
 func main() {
-	config := parseFlags()
+	if len(os.Args) < 2 {
+		printMainUsage()
+		os.Exit(1)
+	}
 
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -54,58 +64,257 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, config); err != nil {
+	var err error
+	switch os.Args[1] {
+	case "file":
+		err = runFileCommand(ctx, os.Args[2:])
+	case "user":
+		err = runUserCommand(ctx, os.Args[2:])
+	case "help", "-h", "--help":
+		printMainUsage()
+		os.Exit(0)
+	default:
+		// If no subcommand, treat as file for backwards compatibility
+		if !strings.HasPrefix(os.Args[1], "-") && !strings.Contains(os.Args[1], "=") {
+			err = runFileCommand(ctx, os.Args[1:])
+		} else {
+			fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
+			printMainUsage()
+			os.Exit(1)
+		}
+	}
+
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func parseFlags() Config {
+func printMainUsage() {
+	fmt.Fprintf(os.Stderr, "Usage: %s <command> [options]\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "\nTwitter/X tweet fetcher using public oEmbed API\n\n")
+	fmt.Fprintf(os.Stderr, "Commands:\n")
+	fmt.Fprintf(os.Stderr, "  file <tweet_ids_file>    Fetch tweets from a file of IDs\n")
+	fmt.Fprintf(os.Stderr, "  user <username>          Fetch tweets for a user from CDX archive\n")
+	fmt.Fprintf(os.Stderr, "  help                     Show this help message\n\n")
+	fmt.Fprintf(os.Stderr, "Examples:\n")
+	fmt.Fprintf(os.Stderr, "  %s file tweet_ids.txt\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s user elonmusk\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s user jack -o jack_tweets.csv\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "\nFor command-specific help:\n")
+	fmt.Fprintf(os.Stderr, "  %s file -h\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s user -h\n", os.Args[0])
+}
+
+func runFileCommand(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("file", flag.ExitOnError)
+
 	var config Config
+	fs.StringVar(&config.OutputFile, "output", "tweets_output.csv", "Output CSV file")
+	fs.StringVar(&config.OutputFile, "o", "tweets_output.csv", "Output CSV file")
+	fs.IntVar(&config.Parallel, "parallel", 20, "Number of parallel requests")
+	fs.IntVar(&config.Parallel, "p", 20, "Number of parallel requests")
+	fs.BoolVar(&config.Quiet, "quiet", false, "Suppress progress bar")
+	fs.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
+	fs.BoolVar(&config.Append, "append", false, "Append to existing output file")
+	fs.BoolVar(&config.Append, "a", false, "Append to existing output file")
 
-	flag.StringVar(&config.OutputFile, "output", "tweets_output.csv", "Output CSV file")
-	flag.StringVar(&config.OutputFile, "o", "tweets_output.csv", "Output CSV file")
-	flag.IntVar(&config.Parallel, "parallel", 20, "Number of parallel requests")
-	flag.IntVar(&config.Parallel, "p", 20, "Number of parallel requests")
-	flag.BoolVar(&config.Quiet, "quiet", false, "Suppress progress bar")
-	flag.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
-	flag.BoolVar(&config.Append, "append", false, "Append to existing output file")
-	flag.BoolVar(&config.Append, "a", false, "Append to existing output file")
-
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <tweet_ids_file>\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "\nTwitter/X tweet fetcher using public oEmbed API\n\n")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s file [options] <tweet_ids_file>\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Fetch tweets from a file containing tweet IDs (one per line)\n\n")
 		fmt.Fprintf(os.Stderr, "Arguments:\n")
-		fmt.Fprintf(os.Stderr, "  tweet_ids_file    File containing tweet IDs (one per line)\n\n")
+		fmt.Fprintf(os.Stderr, "  tweet_ids_file    File containing tweet IDs\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
 
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
-	if flag.NArg() != 1 {
-		flag.Usage()
+	if fs.NArg() != 1 {
+		fs.Usage()
 		os.Exit(1)
 	}
 
-	config.TweetIDsFile = flag.Arg(0)
-
-	if config.Parallel <= 0 {
-		config.Parallel = 20
-	}
-
-	return config
-}
-
-func run(ctx context.Context, config Config) error {
-	// Read tweet IDs
-	tweetIDs, err := readTweetIDs(config.TweetIDsFile)
+	tweetIDsFile := fs.Arg(0)
+	tweetIDs, err := readTweetIDs(tweetIDsFile)
 	if err != nil {
 		return fmt.Errorf("failed to read tweet IDs: %w", err)
 	}
 
 	if len(tweetIDs) == 0 {
-		return fmt.Errorf("no tweet IDs found in %s", config.TweetIDsFile)
+		return fmt.Errorf("no tweet IDs found in %s", tweetIDsFile)
+	}
+
+	config.TweetIDs = tweetIDs
+	return processTweets(ctx, config)
+}
+
+func runUserCommand(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("user", flag.ExitOnError)
+
+	var config Config
+	fs.StringVar(&config.OutputFile, "output", "", "Output CSV file (default: <username>_tweets.csv)")
+	fs.StringVar(&config.OutputFile, "o", "", "Output CSV file (default: <username>_tweets.csv)")
+	fs.IntVar(&config.Parallel, "parallel", 20, "Number of parallel requests")
+	fs.IntVar(&config.Parallel, "p", 20, "Number of parallel requests")
+	fs.BoolVar(&config.Quiet, "quiet", false, "Suppress progress bar")
+	fs.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
+	fs.BoolVar(&config.Append, "append", false, "Append to existing output file")
+	fs.BoolVar(&config.Append, "a", false, "Append to existing output file")
+
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s user [options] <username>\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Fetch tweets for a user from the Wayback Machine CDX archive\n\n")
+		fmt.Fprintf(os.Stderr, "Arguments:\n")
+		fmt.Fprintf(os.Stderr, "  username    Twitter username (without @)\n\n")
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if fs.NArg() != 1 {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	username := strings.TrimPrefix(fs.Arg(0), "@")
+
+	// Set default output file if not specified
+	if config.OutputFile == "" {
+		config.OutputFile = fmt.Sprintf("%s_tweets.csv", username)
+	}
+
+	// Fetch tweet IDs from CDX
+	if !config.Quiet {
+		fmt.Printf("Querying CDX for tweets by @%s...\n", username)
+	}
+
+	tweetIDs, err := fetchTweetIDsFromCDX(ctx, username, config.Quiet)
+	if err != nil {
+		return fmt.Errorf("failed to fetch tweet IDs from CDX: %w", err)
+	}
+
+	if len(tweetIDs) == 0 {
+		return fmt.Errorf("no tweets found for @%s in CDX archive", username)
+	}
+
+	if !config.Quiet {
+		fmt.Printf("Found %d unique tweet IDs for @%s\n", len(tweetIDs), username)
+	}
+
+	config.TweetIDs = tweetIDs
+	return processTweets(ctx, config)
+}
+
+func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]string, error) {
+	// Normalize username to lowercase for matching
+	usernameLower := strings.ToLower(username)
+
+	// Build CDX API URL
+	cdxURL := fmt.Sprintf("https://web.archive.org/cdx/search/cdx?url=twitter.com/%s/status/*&output=json&fl=original&collapse=urlkey", username)
+
+	if !quiet {
+		fmt.Printf("CDX URL: %s\n", cdxURL)
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", cdxURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("CDX query failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("CDX query returned status %d", resp.StatusCode)
+	}
+
+	// Read entire response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CDX response: %w", err)
+	}
+
+	// Parse as JSON array of arrays
+	var results [][]string
+	if err := json.Unmarshal(body, &results); err != nil {
+		return nil, fmt.Errorf("failed to parse CDX JSON response: %w", err)
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("empty CDX response")
+	}
+
+	// Skip header (first element)
+	if len(results) <= 1 {
+		return nil, fmt.Errorf("no data in CDX response")
+	}
+
+	tweetIDMap := make(map[string]bool)
+
+	// Regular expression to extract tweet ID from URL
+	tweetIDRegex := regexp.MustCompile(`(?i)twitter\.com/([^/]+)/status(?:es)?/(\d+)`)
+
+	// Process each result (skip header at index 0)
+	for i := 1; i < len(results); i++ {
+		if len(results[i]) == 0 {
+			continue
+		}
+
+		urlStr := results[i][0]
+
+		// The original field usually doesn't need decoding, but try anyway for safety
+		decodedURL, err := url.QueryUnescape(urlStr)
+		if err != nil {
+			decodedURL = urlStr // Use original if decode fails
+		}
+
+		// Extract username and tweet ID from URL
+		matches := tweetIDRegex.FindStringSubmatch(decodedURL)
+		if len(matches) >= 3 {
+			urlUsername := strings.ToLower(matches[1])
+			tweetID := matches[2]
+
+			// Only include tweets where the username matches exactly (case-insensitive)
+			if urlUsername == usernameLower {
+				tweetIDMap[tweetID] = true
+			}
+		}
+
+		// Show progress for large result sets
+		if !quiet && i%1000 == 0 {
+			fmt.Printf("\rProcessing CDX results... %d entries", i)
+		}
+	}
+
+	if !quiet && len(results) > 1000 {
+		fmt.Printf("\r\033[K") // Clear the progress line
+	}
+
+	// Convert map to slice
+	tweetIDs := make([]string, 0, len(tweetIDMap))
+	for id := range tweetIDMap {
+		tweetIDs = append(tweetIDs, id)
+	}
+
+	return tweetIDs, nil
+}
+
+func processTweets(ctx context.Context, config Config) error {
+	if len(config.TweetIDs) == 0 {
+		return fmt.Errorf("no tweet IDs to process")
 	}
 
 	// Initialize output file
@@ -124,11 +333,11 @@ func run(ctx context.Context, config Config) error {
 	defer writer.Flush()
 
 	if !config.Quiet {
-		fmt.Printf("Fetching %d tweets...\n", len(tweetIDs))
+		fmt.Printf("Fetching %d tweets...\n", len(config.TweetIDs))
 	}
 
 	// Fetch tweets and write incrementally
-	completed := fetchTweets(ctx, tweetIDs, config.Parallel, config.Quiet, writer)
+	completed := fetchTweets(ctx, config.TweetIDs, config.Parallel, config.Quiet, writer)
 
 	fmt.Printf("✓ Complete! Fetched %d tweets. Results saved to %s\n", completed, config.OutputFile)
 	return nil
