@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -344,23 +343,42 @@ func processTweets(ctx context.Context, config Config) error {
 }
 
 func readTweetIDs(filename string) ([]string, error) {
-	file, err := os.Open(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 
+	// Try to handle different encodings - clean invalid UTF-8 sequences
+	content := string(data)
+
+	// Split by newlines and process
 	var tweetIDs []string
-	scanner := bufio.NewScanner(file)
+	lines := strings.Split(content, "\n")
 
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			tweetIDs = append(tweetIDs, line)
+	for _, line := range lines {
+		// Clean up the line - remove invalid UTF-8 and whitespace
+		line = strings.TrimSpace(line)
+		// Remove any non-printable characters
+		cleaned := strings.Map(func(r rune) rune {
+			if r == '\r' || r == '\t' {
+				return ' '
+			}
+			if r < 32 && r != '\n' {
+				return -1 // Remove control characters
+			}
+			if r == 0xFFFD { // Unicode replacement character
+				return -1
+			}
+			return r
+		}, line)
+
+		cleaned = strings.TrimSpace(cleaned)
+		if cleaned != "" {
+			tweetIDs = append(tweetIDs, cleaned)
 		}
 	}
 
-	return tweetIDs, scanner.Err()
+	return tweetIDs, nil
 }
 
 func initOutputFile(filename string, append bool) error {
