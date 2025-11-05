@@ -108,8 +108,8 @@ func printMainUsage() {
 func setupCommonFlags(fs *flag.FlagSet, config *Config, outputDefault string) {
 	fs.StringVar(&config.OutputFile, "output", outputDefault, "Output CSV file")
 	fs.StringVar(&config.OutputFile, "o", outputDefault, "Output CSV file")
-	fs.IntVar(&config.Parallel, "parallel", 10, "Number of parallel requests")
-	fs.IntVar(&config.Parallel, "p", 10, "Number of parallel requests")
+	fs.IntVar(&config.Parallel, "parallel", 5, "Number of parallel requests")
+	fs.IntVar(&config.Parallel, "p", 5, "Number of parallel requests")
 	fs.BoolVar(&config.Quiet, "quiet", false, "Suppress progress bar")
 	fs.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
 	fs.BoolVar(&config.Append, "append", false, "Append to existing output file")
@@ -505,16 +505,28 @@ func fetchTweets(ctx context.Context, tweetIDs []string, parallel int, quiet boo
 	}
 
 	if len(failedTweets) > 0 {
-		fmt.Fprintf(os.Stderr, "\nFailed to fetch %d tweets (after retries):\n", len(failedTweets))
-		maxShow := 10
-		if len(failedTweets) < maxShow {
-			maxShow = len(failedTweets)
-		}
-		for i := 0; i < maxShow; i++ {
-			fmt.Fprintf(os.Stderr, "  - %s\n", failedTweets[i])
-		}
-		if len(failedTweets) > maxShow {
-			fmt.Fprintf(os.Stderr, "  ... and %d more\n", len(failedTweets)-maxShow)
+		if jsonMode {
+			errorData := map[string]interface{}{
+				"error":     "failed_tweets",
+				"count":     len(failedTweets),
+				"tweet_ids": failedTweets,
+			}
+			jsonBytes, err := json.Marshal(errorData)
+			if err == nil {
+				fmt.Println(string(jsonBytes))
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "\nFailed to fetch %d tweets (after retries):\n", len(failedTweets))
+			maxShow := 10
+			if len(failedTweets) < maxShow {
+				maxShow = len(failedTweets)
+			}
+			for i := 0; i < maxShow; i++ {
+				fmt.Fprintf(os.Stderr, "  - %s\n", failedTweets[i])
+			}
+			if len(failedTweets) > maxShow {
+				fmt.Fprintf(os.Stderr, "  ... and %d more\n", len(failedTweets)-maxShow)
+			}
 		}
 	}
 
