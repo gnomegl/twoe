@@ -24,6 +24,7 @@ type Config struct {
 	Parallel   int
 	Quiet      bool
 	Append     bool
+	JSON       bool
 }
 
 type TweetData struct {
@@ -52,7 +53,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -73,7 +73,6 @@ func main() {
 		printMainUsage()
 		os.Exit(0)
 	default:
-		// If no subcommand, treat as file for backwards compatibility
 		if !strings.HasPrefix(os.Args[1], "-") && !strings.Contains(os.Args[1], "=") {
 			err = runFileCommand(ctx, os.Args[1:])
 		} else {
@@ -117,6 +116,8 @@ func runFileCommand(ctx context.Context, args []string) error {
 	fs.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
 	fs.BoolVar(&config.Append, "append", false, "Append to existing output file")
 	fs.BoolVar(&config.Append, "a", false, "Append to existing output file")
+	fs.BoolVar(&config.JSON, "json", false, "Output NDJSON to stdout instead of CSV")
+	fs.BoolVar(&config.JSON, "j", false, "Output NDJSON to stdout instead of CSV")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s file [options] <tweet_ids_file>\n\n", os.Args[0])
@@ -154,6 +155,7 @@ func runUserCommand(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("user", flag.ExitOnError)
 
 	var config Config
+	var checkOnly bool
 	fs.StringVar(&config.OutputFile, "output", "", "Output CSV file (default: <username>_tweets.csv)")
 	fs.StringVar(&config.OutputFile, "o", "", "Output CSV file (default: <username>_tweets.csv)")
 	fs.IntVar(&config.Parallel, "parallel", 20, "Number of parallel requests")
@@ -162,6 +164,10 @@ func runUserCommand(ctx context.Context, args []string) error {
 	fs.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
 	fs.BoolVar(&config.Append, "append", false, "Append to existing output file")
 	fs.BoolVar(&config.Append, "a", false, "Append to existing output file")
+	fs.BoolVar(&config.JSON, "json", false, "Output NDJSON to stdout instead of CSV")
+	fs.BoolVar(&config.JSON, "j", false, "Output NDJSON to stdout instead of CSV")
+	fs.BoolVar(&checkOnly, "check", false, "Only return the count of tweet IDs discovered")
+	fs.BoolVar(&checkOnly, "c", false, "Only return the count of tweet IDs discovered")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s user [options] <username>\n\n", os.Args[0])
@@ -183,17 +189,15 @@ func runUserCommand(ctx context.Context, args []string) error {
 
 	username := strings.TrimPrefix(fs.Arg(0), "@")
 
-	// Set default output file if not specified
 	if config.OutputFile == "" {
 		config.OutputFile = fmt.Sprintf("%s_tweets.csv", username)
 	}
 
-	// Fetch tweet IDs 
-	if !config.Quiet {
-		fmt.Printf("Querying for tweets by @%s...\n", username)
+	if !config.Quiet && !checkOnly && !config.JSON {
+		fmt.Fprintf(os.Stderr, "Querying for tweets by @%s...\n", username)
 	}
 
-	tweetIDs, err := fetchTweetIDsFromCDX(ctx, username, config.Quiet)
+	tweetIDs, err := fetchTweetIDsFromCDX(ctx, username, config.Quiet || checkOnly || config.JSON)
 	if err != nil {
 		return fmt.Errorf("failed to fetch tweet IDs: %w", err)
 	}
@@ -202,8 +206,13 @@ func runUserCommand(ctx context.Context, args []string) error {
 		return fmt.Errorf("no tweets found for @%s", username)
 	}
 
-	if !config.Quiet {
-		fmt.Printf("Found %d unique tweet IDs for @%s\n", len(tweetIDs), username)
+	if checkOnly {
+		fmt.Fprintf(os.Stderr, "%d\n", len(tweetIDs))
+		return nil
+	}
+
+	if !config.Quiet && !config.JSON {
+		fmt.Fprintf(os.Stderr, "Found %d unique tweet IDs for @%s\n", len(tweetIDs), username)
 	}
 
 	config.TweetIDs = tweetIDs
@@ -211,10 +220,8 @@ func runUserCommand(ctx context.Context, args []string) error {
 }
 
 func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]string, error) {
-	// Normalize username to lowercase for matching
 	usernameLower := strings.ToLower(username)
 
-	// Build CDX API URL
 	cdxURL := fmt.Sprintf("https://web.archive.org/cdx/search/cdx?url=twitter.com/%s/status/*&output=json&fl=original&collapse=urlkey", username)
 
 	if !quiet {
@@ -239,13 +246,11 @@ func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]s
 		return nil, fmt.Errorf("Query returned status %d", resp.StatusCode)
 	}
 
-	// Read entire response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Parse as JSON array of arrays
 	var results [][]string
 	if err := json.Unmarshal(body, &results); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
@@ -255,17 +260,14 @@ func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]s
 		return nil, fmt.Errorf("empty response")
 	}
 
-	// Skip header (first element)
 	if len(results) <= 1 {
 		return nil, fmt.Errorf("no data in response")
 	}
 
 	tweetIDMap := make(map[string]bool)
 
-	// Regular expression to extract tweet ID from URL
 	tweetIDRegex := regexp.MustCompile(`(?i)twitter\.com/([^/]+)/status(?:es)?/(\d+)`)
 
-	// Process each result (skip header at index 0)
 	for i := 1; i < len(results); i++ {
 		if len(results[i]) == 0 {
 			continue
@@ -273,35 +275,30 @@ func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]s
 
 		urlStr := results[i][0]
 
-		// The original field usually doesn't need decoding, but try anyway for safety
 		decodedURL, err := url.QueryUnescape(urlStr)
 		if err != nil {
-			decodedURL = urlStr // Use original if decode fails
+			decodedURL = urlStr
 		}
 
-		// Extract username and tweet ID from URL
 		matches := tweetIDRegex.FindStringSubmatch(decodedURL)
 		if len(matches) >= 3 {
 			urlUsername := strings.ToLower(matches[1])
 			tweetID := matches[2]
 
-			// Only include tweets where the username matches exactly (case-insensitive)
 			if urlUsername == usernameLower {
 				tweetIDMap[tweetID] = true
 			}
 		}
 
-		// Show progress for large result sets
 		if !quiet && i%1000 == 0 {
-			fmt.Printf("\rProcessing results... %d entries", i)
+			fmt.Fprintf(os.Stderr, "\rProcessing results... %d entries", i)
 		}
 	}
 
 	if !quiet && len(results) > 1000 {
-		fmt.Printf("\r\033[K") // Clear the progress line
+		fmt.Fprintf(os.Stderr, "\r\033[K")
 	}
 
-	// Convert map to slice
 	tweetIDs := make([]string, 0, len(tweetIDMap))
 	for id := range tweetIDMap {
 		tweetIDs = append(tweetIDs, id)
@@ -315,29 +312,34 @@ func processTweets(ctx context.Context, config Config) error {
 		return fmt.Errorf("no tweet IDs to process")
 	}
 
-	// Initialize output file
-	if err := initOutputFile(config.OutputFile, config.Append); err != nil {
-		return fmt.Errorf("failed to initialize output file: %w", err)
+	var writer *csv.Writer
+	var file *os.File
+
+	if !config.JSON {
+		if err := initOutputFile(config.OutputFile, config.Append); err != nil {
+			return fmt.Errorf("failed to initialize output file: %w", err)
+		}
+
+		var err error
+		file, err = os.OpenFile(config.OutputFile, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open output file: %w", err)
+		}
+		defer file.Close()
+
+		writer = csv.NewWriter(file)
+		defer writer.Flush()
 	}
 
-	// Open file for incremental writing
-	file, err := os.OpenFile(config.OutputFile, os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open output file: %w", err)
-	}
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	if !config.Quiet {
-		fmt.Printf("Fetching %d tweets...\n", len(config.TweetIDs))
+	if !config.Quiet && !config.JSON {
+		fmt.Fprintf(os.Stderr, "Fetching %d tweets...\n", len(config.TweetIDs))
 	}
 
-	// Fetch tweets and write incrementally
-	completed := fetchTweets(ctx, config.TweetIDs, config.Parallel, config.Quiet, writer)
+	completed := fetchTweets(ctx, config.TweetIDs, config.Parallel, config.Quiet, config.JSON, writer)
 
-	fmt.Printf("✓ Complete! Fetched %d tweets. Results saved to %s\n", completed, config.OutputFile)
+	if !config.JSON {
+		fmt.Fprintf(os.Stderr, "✓ Complete! Fetched %d tweets. Results saved to %s\n", completed, config.OutputFile)
+	}
 	return nil
 }
 
@@ -347,25 +349,21 @@ func readTweetIDs(filename string) ([]string, error) {
 		return nil, err
 	}
 
-	// Try to handle different encodings - clean invalid UTF-8 sequences
 	content := string(data)
 
-	// Split by newlines and process
 	var tweetIDs []string
 	lines := strings.Split(content, "\n")
 
 	for _, line := range lines {
-		// Clean up the line - remove invalid UTF-8 and whitespace
 		line = strings.TrimSpace(line)
-		// Remove any non-printable characters
 		cleaned := strings.Map(func(r rune) rune {
 			if r == '\r' || r == '\t' {
 				return ' '
 			}
 			if r < 32 && r != '\n' {
-				return -1 // Remove control characters
+				return -1
 			}
-			if r == 0xFFFD { // Unicode replacement character
+			if r == 0xFFFD {
 				return -1
 			}
 			return r
@@ -381,12 +379,10 @@ func readTweetIDs(filename string) ([]string, error) {
 }
 
 func initOutputFile(filename string, append bool) error {
-	// Check if file exists
 	_, err := os.Stat(filename)
 	fileExists := err == nil
 
 	if !append || !fileExists {
-		// Create new file with header
 		file, err := os.Create(filename)
 		if err != nil {
 			return err
@@ -403,25 +399,22 @@ func initOutputFile(filename string, append bool) error {
 	return nil
 }
 
-func fetchTweets(ctx context.Context, tweetIDs []string, parallel int, quiet bool, writer *csv.Writer) int {
+func fetchTweets(ctx context.Context, tweetIDs []string, parallel int, quiet bool, jsonMode bool, writer *csv.Writer) int {
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 
-	// Progress tracking
 	var completed int64
 	var successCount int64
 	var mu sync.Mutex
 	total := len(tweetIDs)
 
-	// Mutex for CSV writer
 	var writerMu sync.Mutex
 
-	if !quiet {
+	if !quiet && !jsonMode {
 		showProgress(0, total)
 	}
 
-	// Progress updater
-	if !quiet {
+	if !quiet && !jsonMode {
 		go func() {
 			ticker := time.NewTicker(100 * time.Millisecond)
 			defer ticker.Stop()
@@ -443,11 +436,9 @@ func fetchTweets(ctx context.Context, tweetIDs []string, parallel int, quiet boo
 		}()
 	}
 
-	// Track failed tweets for reporting
 	var failedTweets []string
 	var failedMu sync.Mutex
 
-	// Launch workers
 	for _, tweetID := range tweetIDs {
 		wg.Add(1)
 		go func(id string) {
@@ -461,32 +452,44 @@ func fetchTweets(ctx context.Context, tweetIDs []string, parallel int, quiet boo
 
 				result := fetchTweet(ctx, id)
 
-				// Write result immediately if successful
 				if result.Text != "Tweet not found" {
-					record := []string{
-						"@" + result.Handle,
-						"0", // Followers - not available from oEmbed
-						result.TweetID,
-						"2025-08-28 12:00:00", // Date - not available from oEmbed
-						result.TweetType,
-						result.Text,
-						result.URL,
-						"en", // Language - not available from oEmbed
-						"0",  // Reposts - not available from oEmbed
-						"0",  // Likes - not available from oEmbed
-						"0",  // Quotes - not available from oEmbed
-					}
+					if jsonMode {
+						jsonData := map[string]interface{}{
+							"handle":   result.Handle,
+							"tweet_id": result.TweetID,
+							"type":     result.TweetType,
+							"text":     result.Text,
+							"url":      result.URL,
+						}
+						jsonBytes, err := json.Marshal(jsonData)
+						if err == nil {
+							fmt.Println(string(jsonBytes))
+						}
+					} else {
+						record := []string{
+							"@" + result.Handle,
+							"0",
+							result.TweetID,
+							"2025-08-28 12:00:00",
+							result.TweetType,
+							result.Text,
+							result.URL,
+							"en",
+							"0",
+							"0",
+							"0",
+						}
 
-					writerMu.Lock()
-					writer.Write(record)
-					writer.Flush() // Flush immediately to write to disk
-					writerMu.Unlock()
+						writerMu.Lock()
+						writer.Write(record)
+						writer.Flush()
+						writerMu.Unlock()
+					}
 
 					mu.Lock()
 					successCount++
 					mu.Unlock()
 				} else {
-					// Track failed tweet
 					failedMu.Lock()
 					failedTweets = append(failedTweets, id)
 					failedMu.Unlock()
@@ -499,27 +502,24 @@ func fetchTweets(ctx context.Context, tweetIDs []string, parallel int, quiet boo
 		}(tweetID)
 	}
 
-	// Wait for all workers to complete
 	wg.Wait()
 
-	if !quiet {
+	if !quiet && !jsonMode {
 		showProgress(total, total)
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 	}
 
-	// Report failed tweets if any
 	if len(failedTweets) > 0 {
-		fmt.Printf("\nFailed to fetch %d tweets (after retries):\n", len(failedTweets))
-		// Show first 10 failed IDs as examples
+		fmt.Fprintf(os.Stderr, "\nFailed to fetch %d tweets (after retries):\n", len(failedTweets))
 		maxShow := 10
 		if len(failedTweets) < maxShow {
 			maxShow = len(failedTweets)
 		}
 		for i := 0; i < maxShow; i++ {
-			fmt.Printf("  - %s\n", failedTweets[i])
+			fmt.Fprintf(os.Stderr, "  - %s\n", failedTweets[i])
 		}
 		if len(failedTweets) > maxShow {
-			fmt.Printf("  ... and %d more\n", len(failedTweets)-maxShow)
+			fmt.Fprintf(os.Stderr, "  ... and %d more\n", len(failedTweets)-maxShow)
 		}
 	}
 
@@ -532,7 +532,6 @@ func fetchTweet(ctx context.Context, tweetID string) TweetResult {
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 1s, 2s, 4s
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			select {
 			case <-ctx.Done():
@@ -548,10 +547,7 @@ func fetchTweet(ctx context.Context, tweetID string) TweetResult {
 		lastErr = err
 	}
 
-	// All retries failed
 	if lastErr != nil {
-		// Log the error for debugging (optional)
-		// fmt.Fprintf(os.Stderr, "Failed to fetch tweet %s after %d attempts: %v\n", tweetID, maxRetries, lastErr)
 	}
 	return createErrorResult(tweetID)
 }
@@ -578,7 +574,6 @@ func attemptFetchTweet(ctx context.Context, tweetID string) (TweetResult, error)
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 404 {
-		// Tweet doesn't exist, no point retrying
 		return createErrorResult(tweetID), nil
 	}
 
@@ -604,7 +599,6 @@ func attemptFetchTweet(ctx context.Context, tweetID string) (TweetResult, error)
 }
 
 func processTweetData(tweetID string, data TweetData) TweetResult {
-	// Extract handle from author URL
 	handle := "unknown"
 	if data.AuthorURL != "" {
 		re := regexp.MustCompile(`twitter\.com/([^/]+)`)
@@ -614,10 +608,8 @@ func processTweetData(tweetID string, data TweetData) TweetResult {
 		}
 	}
 
-	// Clean HTML content
 	text := cleanHTML(data.HTML)
 
-	// Determine tweet type
 	tweetType := "Post"
 	if strings.HasPrefix(text, "@") {
 		tweetType = "Replies"
@@ -633,11 +625,9 @@ func processTweetData(tweetID string, data TweetData) TweetResult {
 }
 
 func cleanHTML(html string) string {
-	// Remove HTML tags
 	re := regexp.MustCompile(`<[^>]*>`)
 	text := re.ReplaceAllString(html, "")
 
-	// Decode HTML entities
 	replacements := map[string]string{
 		"&lt;":   "<",
 		"&gt;":   ">",
@@ -649,19 +639,16 @@ func cleanHTML(html string) string {
 		text = strings.ReplaceAll(text, old, new)
 	}
 
-	// Remove Twitter pic links and author attribution
 	re = regexp.MustCompile(`pic\.twitter\.com\S*`)
 	text = re.ReplaceAllString(text, "")
 
 	re = regexp.MustCompile(`—.*`)
 	text = re.ReplaceAllString(text, "")
 
-	// Clean whitespace
 	text = strings.TrimSpace(text)
 	re = regexp.MustCompile(`\s+`)
 	text = re.ReplaceAllString(text, " ")
 
-	// Limit length
 	if len(text) > 200 {
 		text = text[:200]
 	}
@@ -686,5 +673,5 @@ func showProgress(current, total int) {
 	empty := width - filled
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
-	fmt.Printf("\r\033[K[%s] %d/%d (%d%%)", bar, current, total, percentage)
+	fmt.Fprintf(os.Stderr, "\r\033[K[%s] %d/%d (%d%%)", bar, current, total, percentage)
 }
