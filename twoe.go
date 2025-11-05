@@ -94,7 +94,7 @@ func printMainUsage() {
 	fmt.Fprintf(os.Stderr, "\nTwitter/X tweet fetcher using public oEmbed API\n\n")
 	fmt.Fprintf(os.Stderr, "Commands:\n")
 	fmt.Fprintf(os.Stderr, "  file <tweet_ids_file>    Fetch tweets from a file of IDs\n")
-	fmt.Fprintf(os.Stderr, "  user <username>          Fetch tweets for a user from CDX archive\n")
+	fmt.Fprintf(os.Stderr, "  user <username>          Fetch tweets for a user\n")
 	fmt.Fprintf(os.Stderr, "  help                     Show this help message\n\n")
 	fmt.Fprintf(os.Stderr, "Examples:\n")
 	fmt.Fprintf(os.Stderr, "  %s file tweet_ids.txt\n", os.Args[0])
@@ -165,7 +165,7 @@ func runUserCommand(ctx context.Context, args []string) error {
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s user [options] <username>\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Fetch tweets for a user from the Wayback Machine CDX archive\n\n")
+		fmt.Fprintf(os.Stderr, "Fetch tweets for a user\n\n")
 		fmt.Fprintf(os.Stderr, "Arguments:\n")
 		fmt.Fprintf(os.Stderr, "  username    Twitter username (without @)\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
@@ -188,18 +188,18 @@ func runUserCommand(ctx context.Context, args []string) error {
 		config.OutputFile = fmt.Sprintf("%s_tweets.csv", username)
 	}
 
-	// Fetch tweet IDs from CDX
+	// Fetch tweet IDs 
 	if !config.Quiet {
-		fmt.Printf("Querying CDX for tweets by @%s...\n", username)
+		fmt.Printf("Querying for tweets by @%s...\n", username)
 	}
 
 	tweetIDs, err := fetchTweetIDsFromCDX(ctx, username, config.Quiet)
 	if err != nil {
-		return fmt.Errorf("failed to fetch tweet IDs from CDX: %w", err)
+		return fmt.Errorf("failed to fetch tweet IDs: %w", err)
 	}
 
 	if len(tweetIDs) == 0 {
-		return fmt.Errorf("no tweets found for @%s in CDX archive", username)
+		return fmt.Errorf("no tweets found for @%s", username)
 	}
 
 	if !config.Quiet {
@@ -218,7 +218,6 @@ func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]s
 	cdxURL := fmt.Sprintf("https://web.archive.org/cdx/search/cdx?url=twitter.com/%s/status/*&output=json&fl=original&collapse=urlkey", username)
 
 	if !quiet {
-		fmt.Printf("CDX URL: %s\n", cdxURL)
 	}
 
 	client := &http.Client{
@@ -232,33 +231,33 @@ func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]s
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("CDX query failed: %w", err)
+		return nil, fmt.Errorf("Tweets query failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("CDX query returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("Query returned status %d", resp.StatusCode)
 	}
 
 	// Read entire response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read CDX response: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	// Parse as JSON array of arrays
 	var results [][]string
 	if err := json.Unmarshal(body, &results); err != nil {
-		return nil, fmt.Errorf("failed to parse CDX JSON response: %w", err)
+		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
 	}
 
 	if len(results) == 0 {
-		return nil, fmt.Errorf("empty CDX response")
+		return nil, fmt.Errorf("empty response")
 	}
 
 	// Skip header (first element)
 	if len(results) <= 1 {
-		return nil, fmt.Errorf("no data in CDX response")
+		return nil, fmt.Errorf("no data in response")
 	}
 
 	tweetIDMap := make(map[string]bool)
@@ -294,7 +293,7 @@ func fetchTweetIDsFromCDX(ctx context.Context, username string, quiet bool) ([]s
 
 		// Show progress for large result sets
 		if !quiet && i%1000 == 0 {
-			fmt.Printf("\rProcessing CDX results... %d entries", i)
+			fmt.Printf("\rProcessing results... %d entries", i)
 		}
 	}
 
