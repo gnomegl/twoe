@@ -35,6 +35,7 @@ type TweetData struct {
 
 type TweetResult struct {
 	Handle    string
+	Name      string
 	TweetID   string
 	TweetType string
 	Text      string
@@ -104,20 +105,23 @@ func printMainUsage() {
 	fmt.Fprintf(os.Stderr, "  %s user -h\n", os.Args[0])
 }
 
-func runFileCommand(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("file", flag.ExitOnError)
-
-	var config Config
-	fs.StringVar(&config.OutputFile, "output", "tweets_output.csv", "Output CSV file")
-	fs.StringVar(&config.OutputFile, "o", "tweets_output.csv", "Output CSV file")
-	fs.IntVar(&config.Parallel, "parallel", 20, "Number of parallel requests")
-	fs.IntVar(&config.Parallel, "p", 20, "Number of parallel requests")
+func setupCommonFlags(fs *flag.FlagSet, config *Config, outputDefault string) {
+	fs.StringVar(&config.OutputFile, "output", outputDefault, "Output CSV file")
+	fs.StringVar(&config.OutputFile, "o", outputDefault, "Output CSV file")
+	fs.IntVar(&config.Parallel, "parallel", 10, "Number of parallel requests")
+	fs.IntVar(&config.Parallel, "p", 10, "Number of parallel requests")
 	fs.BoolVar(&config.Quiet, "quiet", false, "Suppress progress bar")
 	fs.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
 	fs.BoolVar(&config.Append, "append", false, "Append to existing output file")
 	fs.BoolVar(&config.Append, "a", false, "Append to existing output file")
 	fs.BoolVar(&config.JSON, "json", false, "Output NDJSON to stdout instead of CSV")
 	fs.BoolVar(&config.JSON, "j", false, "Output NDJSON to stdout instead of CSV")
+}
+
+func runFileCommand(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("file", flag.ExitOnError)
+	var config Config
+	setupCommonFlags(fs, &config, "tweets_output.csv")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s file [options] <tweet_ids_file>\n\n", os.Args[0])
@@ -153,19 +157,9 @@ func runFileCommand(ctx context.Context, args []string) error {
 
 func runUserCommand(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("user", flag.ExitOnError)
-
 	var config Config
 	var checkOnly bool
-	fs.StringVar(&config.OutputFile, "output", "", "Output CSV file (default: <username>_tweets.csv)")
-	fs.StringVar(&config.OutputFile, "o", "", "Output CSV file (default: <username>_tweets.csv)")
-	fs.IntVar(&config.Parallel, "parallel", 20, "Number of parallel requests")
-	fs.IntVar(&config.Parallel, "p", 20, "Number of parallel requests")
-	fs.BoolVar(&config.Quiet, "quiet", false, "Suppress progress bar")
-	fs.BoolVar(&config.Quiet, "q", false, "Suppress progress bar")
-	fs.BoolVar(&config.Append, "append", false, "Append to existing output file")
-	fs.BoolVar(&config.Append, "a", false, "Append to existing output file")
-	fs.BoolVar(&config.JSON, "json", false, "Output NDJSON to stdout instead of CSV")
-	fs.BoolVar(&config.JSON, "j", false, "Output NDJSON to stdout instead of CSV")
+	setupCommonFlags(fs, &config, "")
 	fs.BoolVar(&checkOnly, "check", false, "Only return the count of tweet IDs discovered")
 	fs.BoolVar(&checkOnly, "c", false, "Only return the count of tweet IDs discovered")
 
@@ -456,6 +450,7 @@ func fetchTweets(ctx context.Context, tweetIDs []string, parallel int, quiet boo
 					if jsonMode {
 						jsonData := map[string]interface{}{
 							"handle":   result.Handle,
+							"name":     result.Name,
 							"tweet_id": result.TweetID,
 							"type":     result.TweetType,
 							"text":     result.Text,
@@ -608,7 +603,7 @@ func processTweetData(tweetID string, data TweetData) TweetResult {
 		}
 	}
 
-	text := cleanHTML(data.HTML)
+	text, name := cleanHTML(data.HTML)
 
 	tweetType := "Post"
 	if strings.HasPrefix(text, "@") {
@@ -617,6 +612,7 @@ func processTweetData(tweetID string, data TweetData) TweetResult {
 
 	return TweetResult{
 		Handle:    handle,
+		Name:      name,
 		TweetID:   tweetID,
 		TweetType: tweetType,
 		Text:      text,
@@ -624,28 +620,103 @@ func processTweetData(tweetID string, data TweetData) TweetResult {
 	}
 }
 
-func cleanHTML(html string) string {
-	re := regexp.MustCompile(`<[^>]*>`)
-	text := re.ReplaceAllString(html, "")
+func resolveLink(client *http.Client, link string) string {
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := client.Head(link)
+		if err != nil {
+			if attempt < 2 {
+				time.Sleep(time.Duration(1<<uint(attempt)) * time.Second)
+				continue
+			}
+			return ""
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return resp.Header.Get("Location")
+		}
+		return ""
+	}
+	return ""
+}
 
+func resolveTwitterShortLinks(text string) string {
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	re := regexp.MustCompile(`https://t\.co/\S+`)
+	shortLinks := re.FindAllString(text, -1)
+	for _, shortLink := range shortLinks {
+		if resolved := resolveLink(client, shortLink); resolved != "" {
+			text = strings.ReplaceAll(text, shortLink, resolved)
+		}
+	}
+
+	re = regexp.MustCompile(`pic\.twitter\.com/\S+`)
+	picLinks := re.FindAllString(text, -1)
+	for _, picLink := range picLinks {
+		fullLink := "https://" + picLink
+		if resolved := resolveLink(client, fullLink); resolved != "" {
+			text = strings.ReplaceAll(text, picLink, resolved)
+		}
+	}
+
+	return text
+}
+
+func unescapeHTML(text string) string {
 	replacements := map[string]string{
 		"&lt;":   "<",
 		"&gt;":   ">",
 		"&amp;":  "&",
 		"&quot;": "\"",
+		"&#39;":  "'",
+		"&apos;": "'",
 	}
-
 	for old, new := range replacements {
 		text = strings.ReplaceAll(text, old, new)
 	}
+	return text
+}
 
-	re = regexp.MustCompile(`pic\.twitter\.com\S*`)
+func cleanHTML(htmlStr string) (string, string) {
+	name := ""
+	re := regexp.MustCompile(`&mdash;\s*([^(]+)\s*\(@[^)]+\)`)
+	matches := re.FindStringSubmatch(htmlStr)
+	if len(matches) > 1 {
+		name = strings.TrimSpace(matches[1])
+	}
+
+	re = regexp.MustCompile(`<p[^>]*>(.*?)</p>`)
+	matches = re.FindStringSubmatch(htmlStr)
+	text := ""
+	if len(matches) > 1 {
+		text = matches[1]
+	} else {
+		re = regexp.MustCompile(`<[^>]*>`)
+		text = re.ReplaceAllString(htmlStr, "")
+	}
+
+	text = strings.ReplaceAll(text, `\u003c`, "<")
+	text = strings.ReplaceAll(text, `\u003e`, ">")
+
+	text = strings.ReplaceAll(text, "<br>", " ")
+	text = strings.ReplaceAll(text, "<br/>", " ")
+	text = strings.ReplaceAll(text, "<br />", " ")
+
+	re = regexp.MustCompile(`<a[^>]*>(.*?)</a>`)
+	text = re.ReplaceAllString(text, "$1")
+
+	re = regexp.MustCompile(`<[^>]*>`)
 	text = re.ReplaceAllString(text, "")
 
-	re = regexp.MustCompile(`—.*`)
-	text = re.ReplaceAllString(text, "")
-
+	text = unescapeHTML(text)
+	text = resolveTwitterShortLinks(text)
 	text = strings.TrimSpace(text)
+
 	re = regexp.MustCompile(`\s+`)
 	text = re.ReplaceAllString(text, " ")
 
@@ -653,12 +724,13 @@ func cleanHTML(html string) string {
 		text = text[:200]
 	}
 
-	return text
+	return text, name
 }
 
 func createErrorResult(tweetID string) TweetResult {
 	return TweetResult{
 		Handle:    "unknown",
+		Name:      "",
 		TweetID:   tweetID,
 		TweetType: "Post",
 		Text:      "Tweet not found",

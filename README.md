@@ -28,7 +28,7 @@ twoe file [options] <tweet_ids_file>
 Options:
   -a, --append      Append to existing output file
   -o, --output      Output CSV file (default "tweets_output.csv")
-  -p, --parallel    Number of parallel requests (default 20)
+  -p, --parallel    Number of parallel requests (default 50)
   -q, --quiet       Suppress progress bar
   -j, --json        Output NDJSON to stdout instead of CSV
 ```
@@ -41,7 +41,7 @@ twoe user [options] <username>
 Options:
   -a, --append      Append to existing output file
   -o, --output      Output CSV file (default "<username>_tweets.csv")
-  -p, --parallel    Number of parallel requests (default 20)
+  -p, --parallel    Number of parallel requests (default 50)
   -q, --quiet       Suppress progress bar
   -j, --json        Output NDJSON to stdout instead of CSV
   -c, --check       Only return the count of tweet IDs discovered
